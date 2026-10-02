@@ -8794,9 +8794,12 @@ private:
 
         // For contiguous slices starting at first element
         if (spec.is_contiguous && spec.slices[0].start == 0) {
-            // Calculate flat element range
+            // Calculate flat element range.
             size_t start_element = 0;
-            size_t end_element = spec.total_elements;
+            size_t end_element = 1;
+            for (const auto& s : spec.slices) {
+                end_element *= (s.stop - s.start);
+            }
 
             // Find blocks covering this range
             size_t first_block = start_element / elements_per_block;

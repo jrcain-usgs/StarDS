@@ -612,6 +612,76 @@ TEST_F(SlicingTest, Regression_NonDefaultBlockSize_SpansBlocks) {
 }
 
 // ============================================================================
+// Regression: strided slice (step > 1) starting at element 0 across many blocks.
+//
+// createBlockMap()'s contiguous-from-zero branch sized the covered block range
+// from spec.total_elements — the DOWNSAMPLED output count, which folds in the
+// step. But the strided copy in get_slice() reads source elements across the
+// WHOLE window (full rows, every row), so decompressing only enough blocks for
+// the downsampled count left the window's tail undecompressed; extractElements()
+// then silently skipped those ranges and the output's trailing rows came back as
+// all-zeros. No error, correct shape — only wrong (zero) values past some row.
+// Values (not just nonzero-ness) are checked so a zero-filled tail fails.
+// ============================================================================
+TEST_F(SlicingTest, Regression_StridedFromZero_SpansBlocks_1D) {
+    std::string test_file = createTempFile();
+    const size_t N = 8000;
+    {
+        StarConfig config;
+        config.compression = CompressionAlgorithm::NONE;
+        config.block_size = 1024;  // 128 doubles/block -> ~63 blocks
+        auto store = StarDataset::create(test_file, config);
+        NDArray<double> data({N});
+        for (size_t i = 0; i < N; ++i) data.flat(i) = static_cast<double>(i) + 1.0;  // never 0
+        store->put("data", data);
+        store->close();
+    }
+
+    auto store = StarDataset::open(test_file, FileMode::READ_ONLY);
+    for (size_t step : {size_t(2), size_t(3), size_t(5), size_t(10)}) {
+        auto slice = store->get_slice<double>("data", {{0, N, step}});
+        const size_t expected_len = (N + step - 1) / step;  // ceil(N/step)
+        ASSERT_EQ(slice.size(), expected_len) << "step=" << step;
+        for (size_t j = 0; j < slice.size(); ++j) {
+            EXPECT_EQ(slice.flat(j), static_cast<double>(j * step) + 1.0)
+                << "step=" << step << " mismatch @ output " << j
+                << " (source element " << (j * step) << ")";
+        }
+    }
+}
+
+TEST_F(SlicingTest, Regression_StridedFromZero_SpansBlocks_2D) {
+    std::string test_file = createTempFile();
+    const size_t R = 400, C = 300;  // 120000 doubles -> many 1024-byte blocks
+    {
+        StarConfig config;
+        config.compression = CompressionAlgorithm::NONE;
+        config.block_size = 1024;  // 128 doubles/block
+        auto store = StarDataset::create(test_file, config);
+        NDArray<double> data({R, C});
+        for (size_t r = 0; r < R; ++r)
+            for (size_t c = 0; c < C; ++c)
+                data.flat(r * C + c) = static_cast<double>(r * C + c) + 1.0;  // never 0
+        store->put("m", data);
+        store->close();
+    }
+
+    auto store = StarDataset::open(test_file, FileMode::READ_ONLY);
+    for (size_t step : {size_t(2), size_t(3), size_t(5)}) {
+        auto slice = store->get_slice<double>("m", {{0, R, step}, {0, C, step}});
+        const size_t sh = (R + step - 1) / step, sw = (C + step - 1) / step;
+        ASSERT_EQ(slice.shape(), std::vector<size_t>({sh, sw})) << "step=" << step;
+        for (size_t y = 0; y < sh; ++y)
+            for (size_t x = 0; x < sw; ++x) {
+                size_t src_r = y * step, src_c = x * step;
+                EXPECT_EQ(slice.flat(y * sw + x),
+                          static_cast<double>(src_r * C + src_c) + 1.0)
+                    << "step=" << step << " mismatch @ output (" << y << "," << x << ")";
+            }
+    }
+}
+
+// ============================================================================
 // Per-block byte-shuffle codecs (GZIP_SHUFFLE_BLOCK / LZ4_SHUFFLE_BLOCK) apply
 // the shuffle prefilter independently within each block, keeping each block
 // self-contained so get_slice() can decode only the covering blocks. These
