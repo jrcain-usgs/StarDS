@@ -93,6 +93,32 @@ dimension:
     subset_3d = store.get_slice("3d_data", [(0, 20, 2), (5, 15), (0, 20)])
     ```
 
+=== "JS"
+
+    ```js
+    // 1D Slice: getSlice(key, start, count)
+    // returns flat typed array. 1D only.
+    const subset = ds.getSlice("large_array", 1000, 1000);
+    console.log(subset.length);
+
+    // Alt 1D Slice: getSliceND(key, [[start, end]])
+    // ds.getSliceND("big_matrix", [[1000, 2000]]);
+    // returns {data: [], shape: []}
+
+    // 2D Slice from (33, 34) to (43, 44).
+    // getSliceND(key, [[1stDimStart, end], [2ndDimStart, end]])
+    // returns {data: [], shape: []}
+    const subset2D = ds.getSliceND("big_matrix", [[33, 43], [34, 44]]);
+
+    // 3D Slice
+    // getSliceND(key, [[1stDimStart, end, step], [2ndDimStart, end], [3rdDimStart, end]])
+    // returns {data: [], shape: []}
+    const subset3D = ds.getSliceND("3d_data", [[0, 20, 2], [5, 15], [0, 20]]);
+
+    // use getSliceNDArray() to return an NDArray
+    // instead of a plain {data:[], shape:[]} object.
+    ```
+
 ## Checking whether an array is sliceable
 
 Every value in the **array namespace** (`ds["key"] = …` / `store.put(...)`) is
