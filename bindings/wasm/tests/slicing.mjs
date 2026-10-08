@@ -70,8 +70,7 @@ ok('vec getSliceND == getSlice', j([...r.getSliceND('vec', [[3, 7]]).data]) === 
 // 2-D: sub-block, column step, and "fewer windows -> trailing dim full".
 check('mat rows{0,3,2} cols{1,4,1}', r, 'mat', mat, [3, 4], [[0, 3, 2], [1, 4, 1]]);
 check('mat cols step 2', r, 'mat', mat, [3, 4], [[0, 3, 1], [0, 4, 2]]);
-check('mat object form {start,stop}', r, 'mat', mat, [3, 4], [{ start: 1, stop: 3 }, { start: 0, stop: 4 }]);
-check('mat one window (rows 1..3, all cols)', r, 'mat', mat, [3, 4], [{ start: 1, stop: 3 }]);
+check('mat one window (rows 1..3, all cols)', r, 'mat', mat, [3, 4], [[1, 3]]);
 check('mat full (no windows)', r, 'mat', mat, [3, 4], []);
 check('mat clamped past end', r, 'mat', mat, [3, 4], [[0, 99, 1], [2, 99, 1]]);
 

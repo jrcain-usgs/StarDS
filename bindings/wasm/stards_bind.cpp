@@ -29,11 +29,14 @@ using star::ValueVariant;
 
 namespace {
 
-// Copy an NDArray<T> into a JS typed array (Int32Array, Float64Array, ...).
-// typed_memory_view gives JS a zero-copy view over the Wasm heap; we then hand
-// that to `new TypedArray(view)`, which copies the bytes in one bulk operation
-// (millions of per-element val.set() calls would be pathologically slow). The
-// returned typed array owns its own buffer, so it stays valid after this returns.
+/**
+ * @brief Copies NDArray into JS typed array.
+ * 
+ * @param arr An NDArray
+ * @param js_ctor JS ArrayType (Int32Array, Float64Array, ...)
+ * 
+ * @return A JS Typed Array
+ */
 template <typename T>
 val to_typed_array(const NDArray<T>& arr, const char* js_ctor) {
     const std::vector<T>& d = arr.data();
@@ -41,13 +44,16 @@ val to_typed_array(const NDArray<T>& arr, const char* js_ctor) {
     return val::global(js_ctor).new_(view);
 }
 
-// The single place the DataType -> (C++ type, JS TypedArray ctor) mapping lives.
-// Resolves `dt` to its element type and invokes fn(T{}, ctor); callers recover the
-// type via decltype(tag). This lets get()/getSlice()/metaGet() share one table
-// instead of each repeating a 10-case switch that must be kept in lockstep.
-// `ctx` names the caller for the error message on an unsupported dtype.
-// Returns whatever `fn` returns (same type across all dtypes) — usually a `val`,
-// but callers also use it to build a ValueVariant or a JsNDArray.
+
+/**
+ * @brief Translates C++ DataType to JS Type and calls fn(), passing in the type.
+ * 
+ * @param dt A C++ DataType (ie, INT8)
+ * @param ctx Name of the calling function (for error logging)
+ * @param fn Callable fn(Type{}, "TypedArrName"). fn can get Type via decltype(arg1).
+ * 
+ * @return Returns what fn returns
+ */
 template <typename F>
 auto dispatch_numeric(DataType dt, const char* ctx, F&& fn) -> decltype(fn(int8_t{}, "")) {
     switch (dt) {
@@ -67,8 +73,8 @@ auto dispatch_numeric(DataType dt, const char* ctx, F&& fn) -> decltype(fn(int8_
     }
 }
 
-// Reverse of datatype_to_string: the dtype name the JS side passes to metaPut()
-// (matches what dtype()/metaDtype() report). Throws on an unknown name.
+
+// Translates string to C++ DataType
 DataType datatype_from_string(const std::string& s) {
     if (s == "int8")    return DataType::INT8;
     if (s == "int16")   return DataType::INT16;
@@ -84,8 +90,11 @@ DataType datatype_from_string(const std::string& s) {
     throw std::runtime_error("unknown dtype: " + s);
 }
 
-// Build read-time OpenOptions from a plain JS object (or null/undefined -> defaults).
-// Recognized keys: { layerInheritance: bool, prefetchWholeBelowBytes: number }.
+/**
+ * @brief Parses OpenOptions from a JS object.
+ * 
+ * @param opts Recognized options: { layerInheritance: bool, prefetchWholeBelowBytes: number }.
+*/
 OpenOptions parse_open_options(const val& opts) {
     OpenOptions o;  // defaults (layer_inheritance=false, prefetch_whole_below_bytes=8MiB)
     if (opts.isUndefined() || opts.isNull()) return o;
@@ -96,17 +105,21 @@ OpenOptions parse_open_options(const val& opts) {
     return o;
 }
 
-// True for a JS Array or TypedArray (anything with a numeric `.length`), false for
-// a bare number/string/null/undefined. Lets the put path accept a scalar or a 1-D
-// sequence from the same argument.
+/**
+ * @brief Checks if array (as opposed to bare number/string)
+ * 
+ * @return true for JS Array or TypedArray (anything with numeric .length)
+ */
 bool is_array_like(const val& v) {
     if (v.isString() || v.isNull() || v.isUndefined()) return false;
     return v["length"].isNumber();
 }
 
-// Read one JS value as C++ T. 64-bit ints arrive as BigInt (needs -sWASM_BIGINT at
-// link time); every other type round-trips through double, exact for all values a
-// JS Number can represent.
+/**
+ * @brief Reads a JS value as C++ Type.
+ * 
+ * @return value cast to double (except 64-bit int -> BigInt)
+ */
 template <typename T>
 T js_to_scalar(const val& v) {
     if constexpr (std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>) {
@@ -116,8 +129,12 @@ T js_to_scalar(const val& v) {
     }
 }
 
-// Build an NDArray<T> from a JS scalar (-> empty shape, a scalar entry) or an
-// array-like (-> 1-D). The write counterpart of to_typed_array().
+
+/**
+ * @brief Converts JS single-value or array-like to 1-D NDArray
+ * 
+ * @param v array, or single-value
+ */
 template <typename T>
 NDArray<T> js_to_ndarray(const val& v) {
     if (is_array_like(v)) {
@@ -130,7 +147,12 @@ NDArray<T> js_to_ndarray(const val& v) {
     return NDArray<T>(std::vector<T>{js_to_scalar<T>(v)}, std::vector<size_t>{});
 }
 
-// String counterpart: a JS string -> scalar entry, a JS array of strings -> 1-D.
+
+/**
+ * @brief Converts JS string or array of strings to 1-D NDArray
+ * 
+ * @param v string, or array of strings
+ */
 NDArray<std::string> js_to_string_ndarray(const val& v) {
     if (is_array_like(v)) {
         const unsigned n = v["length"].as<unsigned>();
@@ -143,10 +165,8 @@ NDArray<std::string> js_to_string_ndarray(const val& v) {
                                 std::vector<size_t>{});
 }
 
-// a catch for 64 bit bigInts
-// Copy a JS number array (Array or TypedArray) into std::vector<T>. Numeric types
-// go through convertJSArrayToNumberVector (one bulk copy for a TypedArray); 64-bit
-// ints arrive as BigInt so they're read element-wise (needs -sWASM_BIGINT).
+// Copy JS number array (Array or TypedArray) into std::vector<T>.
+// Mostly a catch for BigInt
 template <typename T>
 std::vector<T> js_numbers_to_vector(const val& v) {
     if constexpr (std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>) {
@@ -160,10 +180,15 @@ std::vector<T> js_numbers_to_vector(const val& v) {
     }
 }
 
-// Resolve the shape argument passed from JS: an array-like -> those dims verbatim
-// (empty array -> a scalar entry); anything else (omitted/undefined) -> 1-D of
-// `total`. NDArray's constructor validates that the dims multiply out to the data
-// length, so a wrong shape surfaces as a catchable error.
+
+/**
+ * @brief Allocates a vector based on shape (or size).
+ * 
+ * Defaults to double for JS numbers.
+ * 
+ * @param shape_arg Shape (ie, [10, 20] for a 10x20 2D Array)
+ * @param total Size to allocate (fallback if shape not provided)
+ */
 std::vector<size_t> parse_shape(const val& shape_arg, size_t total) {
     if (is_array_like(shape_arg)) {
         const unsigned nd = shape_arg["length"].as<unsigned>();
@@ -184,8 +209,8 @@ NDArray<T> build_ndarray(const val& value, const val& shape_arg) {
     return NDArray<T>(std::move(data), shape);
 }
 
-// String equivalent of build_ndarray: a bare string is a scalar entry; an array of
-// strings takes the given shape (default 1-D).
+// Build a String NDArray. 
+// Accepts single string (for a length 1 array), or an array of strings.
 NDArray<std::string> build_string_ndarray(const val& value, const val& shape_arg) {
     std::vector<std::string> data;
     if (value.isString()) {
@@ -201,10 +226,9 @@ NDArray<std::string> build_string_ndarray(const val& value, const val& shape_arg
     return NDArray<std::string>(std::move(data), shape);
 }
 
-// Parse one per-dimension slice window for getSliceND. `startStopStep` is
-// {start,stop,step?} or [start,stop,step?]; start defaults to 0, stop to `dim`,
-// step to 1. Values are clamped into range so a window past the end yields a short
-// (or empty) result rather than an out-of-range throw (matching 1-D getSlice).
+
+// Parse 1D slice from array [start, stop, step?].
+// Defaults to start= 0, stop=dim, step=1
 Slice parse_one_slice(const val& startStopStep, size_t dim) {
     double start = 0, stop = static_cast<double>(dim), step = 1;
     if (is_array_like(startStopStep)) {
@@ -212,10 +236,6 @@ Slice parse_one_slice(const val& startStopStep, size_t dim) {
         if (n > 0) start = startStopStep[0].as<double>();
         if (n > 1) stop = startStopStep[1].as<double>();
         if (n > 2) step = startStopStep[2].as<double>();
-    } else {
-        if (!startStopStep["start"].isUndefined()) start = startStopStep["start"].as<double>();
-        if (!startStopStep["stop"].isUndefined()) stop = startStopStep["stop"].as<double>();
-        if (!startStopStep["step"].isUndefined()) step = startStopStep["step"].as<double>();
     }
     const size_t s = start <= 0 ? 0 : std::min(static_cast<size_t>(start), dim);
     size_t e = stop <= 0 ? 0 : std::min(static_cast<size_t>(stop), dim);
@@ -224,13 +244,21 @@ Slice parse_one_slice(const val& startStopStep, size_t dim) {
     return Slice{s, e, st};
 }
 
-// Turn the JS windows array into one Slice per dimension of `shape`. Fewer windows
-// than dims is allowed — trailing dims are taken in full — so common cases stay
-// short. More windows than dims is a (catchable) error.
-std::vector<Slice> parse_slices(const std::vector<size_t>& shape, const val& startStopStepSets) {
+
+// 
+// Example sliceWindows 
+/**
+ * @brief Parse JS window array into vector of Slices.
+ * 
+ * @param shape Used as bound/error check for slices
+ * @param sliceWindows ie, for 2D slice: [[start, stop, step?], [start, stop, step?]]
+ * 
+ * @return vector of Slice spec
+ */
+std::vector<Slice> parse_slices(const std::vector<size_t>& shape, const val& sliceWindows) {
     const unsigned nd = shape.size();
     const unsigned given =
-        is_array_like(startStopStepSets) ? startStopStepSets["length"].as<unsigned>() : 0;
+        is_array_like(sliceWindows) ? sliceWindows["length"].as<unsigned>() : 0;
     if (given > nd) {
         throw std::runtime_error("getSliceND: more slice windows (" + std::to_string(given) +
                                  ") than array dimensions (" + std::to_string(nd) + ")");
@@ -238,16 +266,15 @@ std::vector<Slice> parse_slices(const std::vector<size_t>& shape, const val& sta
     std::vector<Slice> out;
     out.reserve(nd);
     for (unsigned i = 0; i < nd; ++i) {
-        out.push_back(i < given ? parse_one_slice(startStopStepSets[i], shape[i])
+        out.push_back(i < given ? parse_one_slice(sliceWindows[i], shape[i])
                                 : star::slice_all(shape[i]));
     }
     return out;
 }
 
-// Convert a decoded metadata value to its natural JS type: a scalar string/number
-// for scalars, a typed array (numeric) or Array<string> for arrays. 64-bit ints
-// stay BigInt arrays even when scalar (a bare Number would silently lose
-// precision). Shared by metaGet() and metaGetAll().
+
+// Returns metadata value in JS type.
+// If single element, returns scalar or str. Otherwise, array.
 val meta_value_to_js(const MetadataValue& mv) {
     if (mv.dtype == DataType::STRING) {
         NDArray<std::string> a = mv.as<std::string>();
@@ -269,7 +296,7 @@ val meta_value_to_js(const MetadataValue& mv) {
 
 // ---- NDArray (first-class, dtype-erased) ---------------------------------
 
-// Read an index/shape argument (a JS array of numbers) into size_t dims.
+// Read an index/shape argument (JS number array) into size_t dims.
 std::vector<size_t> to_size_vector(const val& a) {
     std::vector<size_t> out;
     if (is_array_like(a)) {
@@ -287,8 +314,7 @@ DataType variant_dtype(const ValueVariant& var) {
     }, var);
 }
 
-// Build a ValueVariant (an NDArray<T>) from JS (value, shape, dtype) — same input
-// convention as Dataset.put.
+// Build a ValueVariant (an NDArray<T>) from JS (value, shape, dtype)
 ValueVariant build_variant(const val& value, const val& shape, const std::string& dtype) {
     if (dtype == "string") return build_string_ndarray(value, shape);
     return dispatch_numeric(datatype_from_string(dtype), "NDArray",
@@ -297,7 +323,7 @@ ValueVariant build_variant(const val& value, const val& shape, const std::string
         });
 }
 
-// Read array `key` from a dataset into a ValueVariant (any dtype, incl. string).
+// Read array `key` from a dataset into a ValueVariant
 ValueVariant read_variant(StarDataset& ds, const std::string& key) {
     const DataType dt = ds.dtype_of(key);
     if (dt == DataType::STRING) return ds.get<std::string>(key);
@@ -320,10 +346,7 @@ val variant_to_js_data(const ValueVariant& var, DataType dt) {
     });
 }
 
-// First-class N-dimensional array exposed to JS. Dtype-erased: wraps StarDS's
-// ValueVariant (an NDArray<T> for the element type). Build one from JS data, from a
-// factory (zeros/ones/full), or from Dataset/Layer.getArray(); write it with
-// putArray(). The element dtype is a runtime value (query it with .dtype()).
+
 class JsNDArray {
 public:
     // new Module.NDArray(value, shape, dtype) — same (value, shape, dtype) convention
