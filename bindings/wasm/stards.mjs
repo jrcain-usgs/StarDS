@@ -1,13 +1,5 @@
-// Convenience loader for the StarDS WebAssembly (embind) module that makes thrown
-// C++ exceptions legible from JavaScript.
-//
-// Why this exists: built with -fexceptions, embind surfaces a thrown C++ exception
-// as a raw pointer (a JS number), not an Error — so a bare `catch (e)` sees e.g.
-// `146664`. -sEXPORT_EXCEPTION_HANDLING_HELPERS exposes Module.getExceptionMessage(e),
-// which decodes that pointer to ['std::runtime_error', '<what()>']. This module
-// wraps the Dataset class so every method AND the constructor rethrow a real JS
-// Error carrying that message — for both synchronous calls and the ASYNCIFY ones
-// that return Promises (open/get/put over the network).
+// Loader for StarDS Wasm.
+// Makes C++ exceptions legible from JavaScript.
 //
 // Usage:
 //   import { loadStarDS } from '../stards.mjs';
@@ -15,8 +7,8 @@
 //   const ds = await Dataset('https://.../foo.stards');   // or new Dataset(...)
 //   try { ds.get('missing'); } catch (e) { console.error(e.message); }
 //
-// Writing to S3 needs AWS credentials in the Emscripten environment. Pass them
-// via the `env` option (installed in preRun, before the runtime reads them):
+// Writing to S3 needs AWS credentials. Pass via the `env` option 
+// (installed in preRun, before the runtime reads them):
 //   const { Dataset } = await loadStarDS({
 //     env: { AWS_ACCESS_KEY_ID: '…', AWS_SECRET_ACCESS_KEY: '…',
 //            AWS_DEFAULT_REGION: 'us-east-1' },   // AWS_SESSION_TOKEN for STS
@@ -24,11 +16,11 @@
 //   const ds = await new Dataset('s3://bucket/key.stards', 'w');
 //   ds.put('a', new Float32Array([1,2,3])); await ds.flush();
 // Any other Module init options (preRun, print, locateFile, …) pass through too.
+
 import initStarDS from './stards_wasm.mjs';
 
-// Turn whatever embind threw into a real Error. Numbers are exception pointers to
-// decode; arrays are already-decoded ['type','what()'] messages; anything else
-// (a genuine JS Error) passes through untouched.
+
+// Decodes C++ errors into JS ones.
 export function decodeException(Module, e) {
   if (typeof e === 'number' && Module.getExceptionMessage) {
     try { return new Error(Module.getExceptionMessage(e).join(': ')); }
@@ -38,9 +30,7 @@ export function decodeException(Module, e) {
   return e;
 }
 
-// TypedArray constructor name -> StarDS dtype. A TypedArray is self-describing (its
-// kind IS its element type), exactly like a numpy array's .dtype in the Python
-// bindings — so we can infer the dtype from it with no ambiguity.
+// TypedArray constructor name -> StarDS dtype
 const TYPED_ARRAY_DTYPE = {
   Int8Array: 'int8', Int16Array: 'int16', Int32Array: 'int32',
   Uint8Array: 'uint8', Uint8ClampedArray: 'uint8', Uint16Array: 'uint16', Uint32Array: 'uint32',
@@ -49,10 +39,6 @@ const TYPED_ARRAY_DTYPE = {
 };
 
 // Infer the on-disk dtype from a JS value when the caller didn't pass one.
-// TypedArrays map exactly; a plain Array (like a Python list) has no element type,
-// so numeric arrays default to 'float64' (exact for integers up to 2^53, no int
-// overflow, and it keeps the fast bulk-copy path) — pass an explicit dtype for a
-// specific integer type, just as numpy needs np.array(list, dtype=...).
 function inferDtype(value) {
   const ctorName = value?.constructor?.name;
   if (ctorName && TYPED_ARRAY_DTYPE[ctorName]) return TYPED_ARRAY_DTYPE[ctorName];
@@ -69,16 +55,14 @@ function inferDtype(value) {
   throw new Error(`cannot infer dtype from value of type ${ctorName ?? typeof value}; pass an explicit dtype`);
 }
 
-// A nested array is an Array whose first element is itself array-like (Array or
-// TypedArray) — e.g. [[1,2,3],[4,5,6]]. Its shape and flat data are derived from
-// the nesting; a caller-supplied shape is then ignored.
+// If an array's first element is array-like, e.g. [[1,2,3],[4,5,6]],
+// shape/flat data can be derived from the nesting; passed shape is ignored.
 function isNested(v) {
   return Array.isArray(v) && v.length > 0 && (Array.isArray(v[0]) || ArrayBuffer.isView(v[0]));
 }
 
-// Descend the first element per axis to get {shape, container, scalar}: `container`
-// is the innermost array-like (used to infer dtype if it's a TypedArray), `scalar`
-// the first leaf value. O(ndim), not O(n).
+// Descend the first element per axis to get
+// {shape, container (used to infer dtype), scalar (1st leaf value)}:
 function nestedInfo(v) {
   const shape = [];
   let cur = v;
@@ -116,8 +100,7 @@ function normalizeData(value, shape, dtype) {
   return [value, shape ?? null, dtype ?? inferDtype(value)];
 }
 
-// True if `x` is an NDArray handle (works through the wrapping Proxy — instanceof
-// consults the prototype, which the Proxy doesn't trap).
+
 function isNDArray(Module, x) {
   return x instanceof Module.NDArray;
 }
@@ -188,17 +171,11 @@ function wrapInstance(Module, obj) {
 //         the runtime runs, e.g. AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
 //         AWS_SESSION_TOKEN / AWS_DEFAULT_REGION for S3 writes, or
 //         AWS_S3_ENDPOINT / AWS_VIRTUAL_HOSTING / AWS_HTTPS for S3-compatible
-//         stores. Only keys you pass are set; entries whose value is null or
-//         undefined are skipped. NOTE: do NOT pass empty strings for the
-//         credential or region vars — the native resolver treats a *set* var as
-//         "provided" (getenv != null), so a blank AWS_ACCESS_KEY_ID makes it
-//         sign with empty credentials instead of falling back / erroring cleanly.
+//         stores.
+//         NOTE: Don't pass empty strings for credential or region vars.
 export async function loadStarDS(options = {}) {
   const { env, preRun, ...moduleConfig } = options;
 
-  // Install `env` on Module.ENV in preRun (ENV is initialised by then), ahead of
-  // any preRun the caller also supplied. Credentials are read lazily by getenv at
-  // open/flush time, so this is early enough for the first S3 request.
   const userPreRun = preRun == null ? [] : (Array.isArray(preRun) ? preRun : [preRun]);
   const envPreRun = (mod) => {
     if (!env) return;
@@ -278,8 +255,7 @@ export async function loadStarDS(options = {}) {
   // wrapped .zeros/.ones/.full factories attached. `shape` defaults to 1-D of the
   // data length and `dtype` is inferred from `value` when omitted (see inferDtype).
   // A nested array (e.g. [[1,2,3],[4,5,6]]) is flattened with its shape derived from
-  // the nesting (any passed shape is ignored). Instances from ds.getArray() are
-  // already wrapped by wrapInstance's return-handling.
+  // the nesting (any passed shape is ignored).
   const NDArray = (value, shape, dtype) =>
     wrapInstance(Module, (() => {
       const [v, s, dt] = normalizeData(value, shape, dtype);
