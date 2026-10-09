@@ -294,7 +294,7 @@ val meta_value_to_js(const MetadataValue& mv) {
     });
 }
 
-// ---- NDArray (first-class, dtype-erased) ---------------------------------
+// ---- NDArray ----
 
 // Read an index/shape argument (JS number array) into size_t dims.
 std::vector<size_t> to_size_vector(const val& a) {
@@ -349,9 +349,8 @@ val variant_to_js_data(const ValueVariant& var, DataType dt) {
 
 class JsNDArray {
 public:
-    // new Module.NDArray(value, shape, dtype) — same (value, shape, dtype) convention
-    // as Dataset.put (value: TypedArray/Array/string; shape: array-like, [] = scalar,
-    // or null = 1-D of the data length).
+    // value: TypedArray/Array/string;
+    // shape: array-like, [] = scalar, or null = 1-D of the data length.
     JsNDArray(val value, val shape, const std::string& dtype)
         : m_var(build_variant(value, shape, dtype)), m_dtype(variant_dtype(m_var)) {}
 
@@ -379,8 +378,8 @@ public:
     // Flat data (row-major) as a typed array (numeric) or Array<string>.
     val data() const { return variant_to_js_data(m_var, m_dtype); }
 
-    // Single element at `indices` (a JS array, one entry per dim). Numeric comes back
-    // as Number (BigInt for 64-bit ints); strings as string.
+
+    // Read a single element at the given indices
     val at(val indices) const {
         std::vector<size_t> idx = to_size_vector(indices);
         return std::visit([&](const auto& arr) -> val {
@@ -392,13 +391,13 @@ public:
         }, m_var);
     }
 
-    // Reshape in place; total element count must match (else a catchable throw).
+    // Reshape in place (total element count must match).
     void reshape(val new_shape) {
         std::vector<size_t> s = to_size_vector(new_shape);
         std::visit([&](auto& arr) { arr.reshape(s); }, m_var);
     }
 
-    // Factories (numeric dtypes only; a string dtype throws "unsupported dtype").
+    // NDArray Factories
     static JsNDArray zeros(val shape, const std::string& dtype) {
         std::vector<size_t> s = to_size_vector(shape);
         return dispatch_numeric(datatype_from_string(dtype), "NDArray.zeros",
@@ -424,6 +423,7 @@ public:
 
     // Move the held variant out (for putArray) — leaves this handle empty.
     ValueVariant take() { return std::move(m_var); }
+
     // Borrow the held variant (for metaPutArray, which copies it in).
     const ValueVariant& variant() const { return m_var; }
 
@@ -432,22 +432,16 @@ private:
     DataType m_dtype;
 };
 
-// JS handle over a dataset layer (C++ LayerView). Holds a shared_ptr so it keeps
-// the base dataset alive independently of the Dataset handle it came from. get()/
-// put() mirror Dataset's, scoped to this layer (with base-layer fallback when the
-// dataset has inheritance enabled); the meta* methods mirror the dataset metadata
-// methods, scoped to this layer.
+
+// JS handle for LayerView. Holds a shared_ptr so it keeps the base
+// dataset alive independently of the Dataset handle it came from.
 class JsLayer {
 public:
     explicit JsLayer(std::shared_ptr<LayerView> layer) : m_layer(std::move(layer)) {}
 
     std::string name() const { return m_layer->name(); }
 
-    // Keys in this layer, as Array<string>. NOTE: reflects LayerView::keys(), which
-    // (per the TODO in stards.h) reports layer metadata + inherited keys but NOT
-    // layer-local ARRAY keys written via put() — those are stored under a prefixed
-    // key the presence check misses. Use get()/metaKeys(); don't rely on keys()/has()
-    // to enumerate arrays you put() into a layer.
+    // Keys in this layer, as string array
     val keys() const {
         std::vector<std::string> k = m_layer->keys();
         val out = val::array();
@@ -455,11 +449,11 @@ public:
         return out;
     }
 
-    // Faithful to LayerView::contains — see the keys() note: returns false for a
-    // layer-local array key even though get() would return it.
+    // Check if layer contains this key
     bool contains(const std::string& key) const { return m_layer->contains(key); }
 
-    // Read array `key` from this layer. Numeric -> typed array; STRING -> Array<string>.
+    // Read array `key` from this layer.
+    // Numeric -> typed array; STRING -> Array<string>.
     val get(const std::string& key) const {
         const DataType dt = layer_dtype(key);
         if (dt == DataType::STRING) {
@@ -473,8 +467,7 @@ public:
         });
     }
 
-    // Write array `key` into this layer. Same (value, shape, dtype) convention as
-    // Dataset.put; requires the dataset opened writable.
+    // Write array `key` into this layer. Requires dataset in write mode.
     void put(const std::string& key, val value, val shape, const std::string& dtype) {
         if (dtype == "string") {
             m_layer->put(key, build_string_ndarray(value, shape));
@@ -486,7 +479,7 @@ public:
         });
     }
 
-    // Read array `key` as a first-class NDArray (shape-aware handle, must .delete()).
+    // Read array `key` as NDArray (shape-aware handle, must .delete()).
     JsNDArray get_array(const std::string& key) const {
         const DataType dt = layer_dtype(key);
         if (dt == DataType::STRING) return JsNDArray(ValueVariant(m_layer->get<std::string>(key)));
@@ -522,18 +515,15 @@ public:
             return val::undefined();
         });
     }
-    // Store an NDArray as layer metadata (any shape). meta.put copies it in, so the
-    // caller's NDArray stays valid. The loader routes metaPut(key, ndarray) here.
+    // Store an NDArray as layer metadata.
     void meta_put_array(const std::string& key, const JsNDArray& arr) {
         std::visit([&](const auto& a) { m_layer->meta.put(key, a); }, arr.variant());
     }
     void meta_remove(const std::string& key) { m_layer->meta.remove(key); }
 
 private:
-    // Resolve the dtype of a layer array key. LayerView exposes no dtype accessor,
-    // so we mirror its internal storage-key scheme (see LayerView::get) and ask the
-    // base dataset: the layer-prefixed key if present, else the unprefixed base key
-    // when the dataset has inheritance enabled.
+    // Resolve the dtype of a layer array key.
+    // At time of writing, no dtype implemented for C++ LayerView.
     DataType layer_dtype(const std::string& key) const {
         std::shared_ptr<StarDataset> base = m_layer->base();
         const std::string& lname = m_layer->name();
@@ -549,23 +539,18 @@ private:
     std::shared_ptr<LayerView> m_layer;
 };
 
-// A thin JS-facing handle around a StarDataset shared_ptr.
 class JsDataset {
 public:
-    // Opens read-only. Under WASM a URL routes through the fetch() backend; a
-    // bare path is a (virtual) local file. Throws on failure -> JS exception.
+    // Opens read-only.
     explicit JsDataset(const std::string& path)
         : m_ds(StarDataset::open(path, "r")) {}
 
-    // Opens with an explicit mode ("r", "w"/"rw"/"a"). Writable modes are needed
-    // for the metadata writers (metaPut/metaRemove/metaClear) and only make sense
-    // on a local/virtual path — a remote URL is read-only over fetch().
+    // Opens with file mode ("r", "w"/"rw"/"a").
     JsDataset(const std::string& path, const std::string& mode)
         : m_ds(StarDataset::open(path, mode)) {}
 
-    // Opens with a mode plus read-time OpenOptions from a JS object, e.g.
+    // Opens with file mode and OpenOptions. Example:
     // new Dataset(url, "r", { layerInheritance: true, prefetchWholeBelowBytes: 0 }).
-    // (layerInheritance can also be toggled after open via setLayerInheritance.)
     JsDataset(const std::string& path, const std::string& mode, val opts)
         : m_ds(StarDataset::open(path, mode, parse_open_options(opts))) {}
 
@@ -573,7 +558,7 @@ public:
     // Not registered as a JS constructor.
     explicit JsDataset(std::shared_ptr<StarDataset> ds) : m_ds(std::move(ds)) {}
 
-    // Array keys present in the dataset (returned to JS as an Array<string>).
+    // Get an array of keys present in the dataset
     val keys() const {
         std::vector<std::string> k = m_ds->get_all_keys();
         val arr = val::array();
@@ -607,18 +592,8 @@ public:
         });
     }
 
-    // Write an array entry. `value` is a TypedArray/Array of numbers, or a
-    // string/Array<string> when dtype is "string"; `dtype` names the on-disk
-    // element type (see datatype_from_string); `shape` gives the dims (an
-    // array-like, or omit/[] — [] is a scalar, omitted is 1-D of the data length).
-    // put() itself never checks the open mode — the entry is held in memory and
-    // overwriting an existing key is allowed — so it works even on a read-only
-    // handle. Persisting is where the mode matters: flush() throws in read-only
-    // mode, while writeBytes()/saveTo() serialize any dataset (see below).
-    // Takes a FLAT value + explicit shape/dtype. The loader (stards.mjs) adds the
-    // conveniences on top: inferring dtype from the value, defaulting shape to 1-D,
-    // and flattening a nested array (e.g. [[1,2,3],[4,5,6]]) into flat data + a
-    // derived shape before it reaches here.
+    // Writes an array to `key` from JS types (value (flat JS Array), shape, dtype)
+    // Use `put_array() for NDArrays.
     void put(const std::string& key, val value, val shape, const std::string& dtype) {
         if (dtype == "string") {
             m_ds->put(key, build_string_ndarray(value, shape));
@@ -630,22 +605,22 @@ public:
         });
     }
 
-    // Read array `key` as a first-class NDArray (a shape-aware handle you must
-    // .delete()). Complements get(), which returns a bare flat typed array.
+    // Read array `key` as a NDArray (NDArrays require .delete()).
+    // Use `get()` for a flat JS array.
     JsNDArray get_array(const std::string& key) const { return JsNDArray(read_variant(*m_ds, key)); }
 
-    // Write an NDArray under `key` (moves its data across — no extra copy). The
-    // counterpart of getArray(); equivalent to put() with the array's dtype/shape.
+
+    // Writes NDArray to `key`.  Use `put` to work in plain JS types.
     void put_array(const std::string& key, JsNDArray arr) {
         std::visit([&](auto&& a) { m_ds->put(key, std::move(a)); }, arr.take());
     }
 
-    // Persist pending writes to the dataset's backing path. Under WASM that path is
-    // in the virtual filesystem. In browser, prefer writeBytes() to get the image back as bytes.
+    // Persist pending writes to the WASM virtual filesystem. 
+    // Use `writeBytes()` to instead get the image back as bytes.
     void flush() { m_ds->flush(); }
 
-    // Serialize the dataset to a .stards image and return it as a
-    // Uint8Array. Just returns bytes, doesn't touch the source file.
+    // Serialize dataset to .stards image and return it as a Uint8Array. 
+    // Just returns bytes, doesn't touch source file.
     val write_bytes() {
         std::vector<char> bytes = m_ds->write_bytes();
         val view(typed_memory_view(bytes.size(),
@@ -653,17 +628,17 @@ public:
         return val::global("Uint8Array").new_(view);
     }
 
-    // Persist the dataset to `path` in the virtual filesystem.
+    // Persist the dataset to `path` in WASM virtual filesystem.
     // Makes a second copy, like "Save As..." in many apps.
     void save_to(const std::string& path) { m_ds->save_to(path); }
 
-    // Best-effort flush + release, mirroring the destructor: a no-op (not an error)
-    // for a read-only dataset. The JS handle itself must still be .delete()'d.
+    // Flush + release. The JS handle itself must still be .delete()'d.
     void close() { m_ds->close(); }
 
-    // Read a string-valued entry (header/attribute style) as a plain JS string,
-    // from the metadata block or from a 1-element string column. Returns "" if the
-    // key is absent, so callers can fall back to a default without a try/catch.
+
+
+    // Reads string from 1st element of metadata array.
+    // Returns "" if no string present.
     std::string meta_string(const std::string& key) const {
         try {
             if (m_ds->meta.contains(key)) {
@@ -680,20 +655,14 @@ public:
         return std::string();
     }
 
-    // Read a metadata-block entry `key` and return it as its natural JS type: a
-    // number/string for scalars, a typed array for arrays, or null if the key is
-    // absent (meta.get() yields nullptr for a miss, so we check before deref'ing).
-    //
-    // This is the general form of metaString(): it dispatches on dtype instead of
-    // assuming string, so numeric attributes come back as numbers/typed arrays.
+    // Returns the value for a metadata `key`
     val meta_get(const std::string& key) const {
         std::shared_ptr<MetadataValue> mv = m_ds->meta.get(key);
         if (!mv) return val::null();
         return meta_value_to_js(*mv);
     }
 
-    // Names of all metadata-block entries (Array<string>). Cheap: reads the
-    // registries, decodes no values.
+    // Returns array of metadata keys
     val meta_keys() const {
         std::vector<std::string> k = m_ds->get_metadata_keys();
         val out = val::array();
@@ -703,14 +672,14 @@ public:
 
     bool meta_contains(const std::string& key) const { return m_ds->meta.contains(key); }
 
-    // dtype name of a metadata entry ("int32", "float64", "string", ...), or "" if
-    // the key is absent.
+    // get dtype for key ("int32", "float64", "string", ...)
+    // or "" if no key found.
     std::string meta_dtype(const std::string& key) const {
         std::shared_ptr<MetadataValue> mv = m_ds->meta.get(key);
         return mv ? mv->type_name() : std::string();
     }
 
-    // Shape of a metadata entry as Array<number> (empty for a scalar, [] if absent).
+    // Shape [] for metadata entry (empty for a scalar, [] if absent).
     val meta_shape(const std::string& key) const {
         val out = val::array();
         std::shared_ptr<MetadataValue> mv = m_ds->meta.get(key);
@@ -721,7 +690,7 @@ public:
         return out;
     }
 
-    // All metadata as a plain JS object { key: naturalValue }.
+    // All metadata as a plain JS object { key: value }.
     val meta_get_all() const {
         std::map<std::string, MetadataValue> all = m_ds->meta.get_all();
         val obj = val::object();
@@ -729,10 +698,7 @@ public:
         return obj;
     }
 
-    // Write a metadata entry. `dtype` picks the on-disk element type (see
-    // datatype_from_string); `value` may be a scalar (-> scalar entry) or an
-    // array-like (-> 1-D). Requires the dataset opened writable, else meta.put
-    // throws. Overwrites any existing entry for `key`.
+    // Write a metadata entry.  Requires writable dataset.
     void meta_put(const std::string& key, val value, const std::string& dtype) {
         if (dtype == "string") {
             m_ds->meta.put(key, js_to_string_ndarray(value));
@@ -743,8 +709,8 @@ public:
             return val::undefined();
         });
     }
-    // Store an NDArray as metadata (any shape). meta.put copies it in, so the
-    // caller's NDArray stays valid. The loader routes metaPut(key, ndarray) here.
+
+    // Store an NDArray as metadata (any shape).
     void meta_put_array(const std::string& key, const JsNDArray& arr) {
         std::visit([&](const auto& a) { m_ds->meta.put(key, a); }, arr.variant());
     }
@@ -753,15 +719,9 @@ public:
     void meta_clear() { m_ds->meta.clear(); }
 
     // True if `key` is stored as blocks and can be windowed with getSlice().
-    // Metadata-block arrays are whole-array only (see StarDataset::is_sliceable).
     bool is_sliceable(const std::string& key) const { return m_ds->is_sliceable(key); }
 
-    // Return elements [start, start+count) of the 1-D array `key` as a typed array.
-    //
-    // The point of this over get(): a slice reads only the compressed blocks that
-    // cover the window, so a caller streaming a large column pays for the bytes it
-    // actually wants instead of downloading the whole array up front. Streaming
-    // consumers (the docs-site hero, for one) live on this.
+    // Returns subset of a 1-D array.
     val get_slice(const std::string& key, double start, double count) const {
         const std::vector<Slice> s = {slice_1d(key, start, count)};
         return dispatch_numeric(m_ds->dtype_of(key), "getSlice", [&](auto tag, const char* ctor) {
@@ -769,13 +729,15 @@ public:
         });
     }
 
-    // N-dimensional strided slice (1-D/2-D/3-D — the ranks the store slices). `windows`
-    // is an array of per-dimension {start,stop,step?} / [start,stop,step?] specs (see
-    // parse_slices: windows clamp, fields default, and omitted trailing dims are taken
-    // in full). Like getSlice, only the covering compressed blocks are read.
-    //
-    // Returns an OBJECT { data, shape }: `data` is the flat (row-major) typed array, 
-    // `shape` its dims. (unlike getSlice/get, which return a bare typed array).
+    /**
+     * @brief N-dimensional strided slice
+     * 
+     * @param key The array to slice
+     * @param windows an array of per-dimension/[start,stop,step?] specs.
+     *                ie [[5, 15], [5, 15]] for a 2D 10x10 square starting at 5x5.
+     * 
+     * @return { data, shape } obj
+     */
     val get_slice_nd(const std::string& key, val windows) const {
         const std::vector<size_t> full_shape = m_ds->shape_of(key);
         // sub-slice calculation (with helper)
@@ -793,9 +755,7 @@ public:
         });
     }
 
-    // Same windowed strided read as getSliceND, but returns NDArray
-    // (a shape-carrying handle you must .delete()) instead of a { data, shape }
-    // object — the getArray()-style counterpart to getSliceND()'s get()-style result.
+    // Same as getSliceND, but returns NDArray (must be .delete()-d).
     JsNDArray get_slice_ndarray(const std::string& key, val windows) const {
         const std::vector<size_t> full_shape = m_ds->shape_of(key);
         const std::vector<Slice> slices = parse_slices(full_shape, windows);
@@ -806,13 +766,7 @@ public:
     }
 
     // Read the same window from three 1-D arrays and return it interleaved as one
-    // Float32Array [x0,y0,z0, x1,y1,z1, ...].
-    //
-    // This is the shape GPU vertex buffers want, and doing the interleave here saves
-    // the caller three separate heap->JS copies plus a JS-side transpose per batch —
-    // which matters when a batch is hundreds of thousands of points. The arrays are
-    // typically float64 on disk (full precision positions); float32 is what the
-    // renderer uploads anyway.
+    // Float32Array [x0,y0,z0, x1,y1,z1, ...], for GPU vertex buffers
     val get_slice_xyz_f32(const std::string& kx, const std::string& ky,
                           const std::string& kz, double start, double count) const {
         // Size from the CLAMPED window, so a request that runs past the end yields a
@@ -836,19 +790,16 @@ public:
         return val::global("Float32Array").new_(view);
     }
 
-    // Requests issued so far (for demos/tests) — proves reads hit the network.
+    // Requests issued so far (for demos/tests).
     double network_requests() const {
         return static_cast<double>(star::g_network_request_count.load());
     }
 
-    // --- introspection --------------------------------------------------------
-
-    // True if `key` exists in EITHER namespace — a stored array or a metadata-block
-    // value. (For an array-only or metadata-only test, use keys()/metaContains.)
+    // True if `key` exists in EITHER namespace — a stored array or a metadata key.
     bool contains(const std::string& key) const { return m_ds->contains(key); }
 
-    // Length of array `key` along its FIRST dimension (like len() of a numpy array —
-    // rows, not total elements). Use shape() for the full dims / element count.
+    // Length of array `key` along its FIRST dimension.
+    // Use shape() for the full dims / element count.
     double array_length(const std::string& key) const {
         return static_cast<double>(m_ds->array_length(key));
     }
@@ -874,9 +825,7 @@ public:
         return out;
     }
 
-    // Warm the cache for `keys` (an array of key names) in one batch. Over a remote
-    // source this issues the covering ranged GETs up front (parallel where possible)
-    // instead of lazily on first access. Throws if any key is unknown.
+    // Prefetch a batch of keys.
     void prefetch(val keys) {
         std::vector<std::string> ks;
         const unsigned n = keys["length"].as<unsigned>();
@@ -885,11 +834,12 @@ public:
         m_ds->prefetch(ks);
     }
 
-    // --- layers ---------------------------------------------------------------
+    // --- layers ---
 
-    // View an existing layer (throws if absent) / create a new one (throws if it
-    // already exists). Both return a Layer handle the caller must .delete().
+    // View an existing layer.  Caller must .delete();
     JsLayer get_layer(const std::string& name) const { return JsLayer(m_ds->get_layer(name)); }
+
+    // Create a new layer. Caller must .delete();
     JsLayer create_layer(const std::string& name) { return JsLayer(m_ds->create_layer(name)); }
 
     bool has_layer(const std::string& name) const { return m_ds->has_layer(name); }
@@ -901,16 +851,13 @@ public:
         return out;
     }
 
-    // Base-layer inheritance for layer lookups (OpenOptions.layer_inheritance; off by
-    // default). When on, a key missing from a layer resolves to the base layer's
-    // value in Layer.get()/keys()/has(); when off, a layer miss stays a miss.
+    // Check layer-inheritance setting
     bool layer_inheritance() const { return m_ds->layer_inheritance(); }
+
     void set_layer_inheritance(bool on) { m_ds->set_layer_inheritance(on); }
 
 private:
-    // Clamp a [start, count) request to the array's actual length, so a caller that
-    // asks for one batch past the end gets a short (or empty) result rather than an
-    // out-of-range throw.
+    // Clamp a [start, count) request to array length. (avoids out-of-range throws)
     Slice slice_1d(const std::string& key, double start, double count) const {
         const std::vector<size_t> shape = m_ds->shape_of(key);
         if (shape.size() != 1) {
@@ -933,32 +880,23 @@ private:
     std::shared_ptr<StarDataset> m_ds;
 };
 
-// Create a NEW writable dataset at `path` with an explicit StarConfig (compression,
-// block size, metadata-block options), returning the JS handle. Unlike the
-// Dataset(path,"w") constructor — which creates on flush with DEFAULT config —
-// create() lets the caller pick the write-time codec. An existing file at `path` is
-// overwritten. Note: on WASM only NONE and the GZIP* codecs are runnable, no ZLIB.
+// Create a writable dataset at virtual `path` with StarConfig (compression and block options).
+// Use instead of Dataset(path,"w") to specify write-time codec (NONE or GZIP*)
 JsDataset create_dataset(const std::string& path, const StarConfig& config) {
     return JsDataset(StarDataset::create(path, config));
 }
 
-// Open a READ-ONLY dataset from a complete .stards image already in memory —
-// `bytes` is a JS Uint8Array (or any numeric TypedArray/Array of byte values). No
-// filesystem or network is touched: the bytes are copied into the Wasm heap and
-// parsed. Round-trips with writeBytes() — openBytes(ds.writeBytes()) reconstructs
-// the dataset. Throws if the bytes are not a valid STAR image. (An ArrayBuffer has
-// no length/indexing, so wrap it first: new Uint8Array(buf).)
+// Open a read-only .stards image from a JS Uint8Array of bytes.
 JsDataset open_bytes_dataset(val bytes, val opts) {
     std::vector<uint8_t> buf = convertJSArrayToNumberVector<uint8_t>(bytes);
     return JsDataset(StarDataset::open_bytes(buf.data(), buf.size(), parse_open_options(opts)));
 }
 
-// --- module-level (non-Dataset) helpers ---------------------------------------
+// --- module-level (non-Dataset) helpers ---
 
 std::string library_version() { return star::getLibraryVersion(); }
 
-// Process-wide network-request counter (the same one Dataset.networkRequests()
-// reads). Exposed at module scope so callers can reset it between operations.
+// Process-wide network-request counter
 double network_request_count() { return static_cast<double>(star::getNetworkRequestCount()); }
 void reset_network_request_count() { star::resetNetworkRequestCount(); }
 
@@ -1032,9 +970,6 @@ EMSCRIPTEN_BINDINGS(stards) {
         .function("metaPutArray", &JsLayer::meta_put_array)
         .function("metaRemove", &JsLayer::meta_remove);
 
-    // First-class, dtype-erased N-D array. Construct from JS data
-    // (new Module.NDArray(value, shape, dtype)) or a factory; read it out with
-    // data()/at(); write it into a dataset with Dataset/Layer.putArray().
     class_<JsNDArray>("NDArray")
         .constructor<val, val, std::string>()
         .function("dtype", &JsNDArray::dtype)
@@ -1048,10 +983,6 @@ EMSCRIPTEN_BINDINGS(stards) {
         .class_function("ones", &JsNDArray::ones)
         .class_function("full", &JsNDArray::full);
 
-    // Compression codecs for StarConfig.compression / .metadataCompression. Only
-    // codecs this build can actually run are exposed.  On WASM that's NONE + the 
-    // GZIP* variants (zlib). The _BLOCK shuffle variants stay sliceable;
-    // the plain _SHUFFLE ones are legacy whole-array (not sliceable).
     enum_<CompressionAlgorithm>("Compression")
         .value("NONE", CompressionAlgorithm::NONE)
 #ifdef ENABLE_ZLIB
@@ -1069,9 +1000,6 @@ EMSCRIPTEN_BINDINGS(stards) {
 #endif
         ;
 
-    // Write-time configuration for create(). Constructed with defaults; set only
-    // the fields you want to change. (metadata_force_separate_keys and the buffer/
-    // arena tuning knobs are intentionally not exposed yet.)
     class_<StarConfig>("StarConfig")
         .constructor<>()
         .property("compression", &StarConfig::compression)
@@ -1080,9 +1008,9 @@ EMSCRIPTEN_BINDINGS(stards) {
         .property("metadataMaxBlockSize", &StarConfig::metadata_max_block_size)
         .property("metadataCompression", &StarConfig::metadata_compression);
 
-    // Module.create(path, config) -> Dataset. See create_dataset() above.
+    // Module.create(path, config) -> Dataset.
     function("create", &create_dataset);
-    // Module.openBytes(uint8Array) -> read-only Dataset. See open_bytes_dataset().
+    // Module.openBytes(uint8Array) -> read-only Dataset.
     function("openBytes", &open_bytes_dataset);
 
     // Module-level helpers.
